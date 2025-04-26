@@ -7,7 +7,7 @@ import { useGameContext } from '../context/GameContext';
 import { Square, Move } from 'chess.js';
 
 interface HandTrackerProps {
-  onHandMove?: (position: { x: number; y: number } | null) => void;
+  onHandMove?: (position: { x: number; y: number; isPinching?: boolean } | null) => void;
 }
 
 const HandTracker: React.FC<HandTrackerProps> = ({ onHandMove }) => {
@@ -20,6 +20,7 @@ const HandTracker: React.FC<HandTrackerProps> = ({ onHandMove }) => {
   const positionBuffer = useRef<{ x: number; y: number }[]>([]);
   const pinchStartPosition = useRef<{ x: number; y: number } | null>(null);
   const pinchStateRef = useRef<boolean>(false);
+  const waitingForSecondPinch = useRef<boolean>(false);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isTracking, setIsTracking] = useState(false);
@@ -152,62 +153,80 @@ const HandTracker: React.FC<HandTrackerProps> = ({ onHandMove }) => {
       // Flip the y-coordinate (1 - y) because the camera's y-axis is inverted
       const smoothed = smoothPosition(indexTip.x, 1 - indexTip.y);
       
+      // Add a visual indicator for the pinch state
+      ctx.beginPath();
+      ctx.arc(indexTip.x * canvas.width, indexTip.y * canvas.height, 15, 0, 2 * Math.PI);
+      ctx.fillStyle = isPinching ? 'rgba(34, 197, 94, 0.7)' : 'rgba(59, 130, 246, 0.5)';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      
       // Send the hand position to the Chessboard component
-      onHandMove?.(smoothed);
+      onHandMove?.({...smoothed, isPinching});
 
-      // Reduce the cooldown time for more responsive interactions
-      // Only process pinch state changes after a cooldown
-      if (isPinching !== pinchStateRef.current && now - lastPinchTime.current > 200) {
+      // Process pinch state changes with a shorter cooldown for more responsive interactions
+      // This prevents rapid toggling while still being responsive
+      if (isPinching !== pinchStateRef.current && now - lastPinchTime.current > 100) {
         const square = calculateSquareFromPosition(smoothed.x, smoothed.y);
 
+        // Double-pinch gesture system
         if (isPinching && !pinchStateRef.current) {
-          // Starting a pinch - only allow selecting pieces of the current player's color
-          const piece = chess.get(square);
-          if (piece && piece.color === chess.turn()) {
-            setSelectedSquare(square);
-            pinchStartPosition.current = smoothed;
-            lastSquare.current = square;
+          // First pinch - select a piece
+          if (!waitingForSecondPinch.current && !selectedSquare) {
+            const piece = chess.get(square);
+            if (piece && piece.color === chess.turn()) {
+              // Select the piece
+              setSelectedSquare(square);
+              pinchStartPosition.current = smoothed;
+              lastSquare.current = square;
+              waitingForSecondPinch.current = true;
+              
+              console.log(`First pinch: Selected ${piece.color} ${piece.type} at ${square}`);
+              
+              // Log the legal moves for this piece for debugging
+              const legalMoves = chess.moves({ 
+                square: square as Square, 
+                verbose: true 
+              }) as Move[];
+              console.log(`Legal moves:`, legalMoves.map(m => m.to));
+            }
+          } 
+          // Second pinch - drop the piece
+          else if (waitingForSecondPinch.current && selectedSquare) {
+            const startSquare = lastSquare.current;
+            const targetSquare = square;
             
-            // Log the legal moves for this piece for debugging
+            console.log(`Second pinch: Dropping at ${targetSquare}`);
+            
+            // Get all legal moves for the selected piece
             const legalMoves = chess.moves({ 
-              square: square as Square, 
+              square: startSquare as Square, 
               verbose: true 
             }) as Move[];
-            console.log(`Selected ${piece.color} ${piece.type} at ${square}. Legal moves:`, 
-              legalMoves.map(m => m.to));
+            
+            // Check if the target square is a legal move
+            const isLegalMove = legalMoves.some(move => move.to === targetSquare);
+            
+            if (isLegalMove) {
+              // Execute the move if it's legal
+              console.log(`Making move from ${startSquare} to ${targetSquare}`);
+              makeMove(startSquare as Square, targetSquare as Square);
+            } else {
+              console.log(`Illegal move attempted: ${startSquare} to ${targetSquare}`);
+            }
+            
+            // Reset selection state
+            setSelectedSquare(null);
+            pinchStartPosition.current = null;
+            lastSquare.current = null;
+            waitingForSecondPinch.current = false;
           }
-        } else if (!isPinching && pinchStateRef.current && selectedSquare) {
-          // Releasing a pinch - enforce legal chess moves
-          const startSquare = lastSquare.current;
-          const targetSquare = calculateSquareFromPosition(smoothed.x, smoothed.y);
-          
-          // Always attempt to make a move when releasing a pinch, even if it's the same square
-          // This ensures the piece is placed at the current hand position
-          
-          // Get all legal moves for the selected piece
-          const legalMoves = chess.moves({ 
-            square: startSquare as Square, 
-            verbose: true 
-          }) as Move[];
-          
-          // Check if the target square is a legal move
-          const isLegalMove = legalMoves.some(move => move.to === targetSquare);
-          
-          if (isLegalMove) {
-            // Execute the move if it's legal
-            console.log(`Making move from ${startSquare} to ${targetSquare}`);
-            makeMove(startSquare as Square, targetSquare as Square);
-          } else if (startSquare !== targetSquare) {
-            // Only show error for different squares
-            console.log(`Illegal move attempted: ${startSquare} to ${targetSquare}`);
-            // Provide visual feedback for illegal moves
-            // The piece will snap back to its original position
-          }
-          
-          // Reset selection state
-          setSelectedSquare(null);
-          pinchStartPosition.current = null;
-          lastSquare.current = null;
+        } 
+        // Releasing the pinch
+        else if (!isPinching && pinchStateRef.current) {
+          // We don't do anything on pinch release except update the state
+          console.log(`Pinch released at ${square}`);
         }
 
         lastPinchTime.current = now;
@@ -215,19 +234,35 @@ const HandTracker: React.FC<HandTrackerProps> = ({ onHandMove }) => {
         setPinchDetected(isPinching);
       }
 
-      // Visual feedback
+      // Visual feedback - status indicator in corner
       ctx.beginPath();
       ctx.arc(30, 30, 15, 0, 2 * Math.PI);
       ctx.fillStyle = isPinching ? '#22c55e' : '#ef4444';
       ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(indexTip.x * canvas.width, indexTip.y * canvas.height, 8, 0, 2 * Math.PI);
-      ctx.fillStyle = selectedSquare ? '#22c55e' : '#3b82f6';
-      ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      
+      // Add text to show the current state
+      ctx.font = '14px Arial';
+      ctx.fillStyle = '#ffffff';
+      
+      // Show different status based on the current state
+      if (isPinching) {
+        ctx.fillText('Pinching', 50, 35);
+      } else if (waitingForSecondPinch.current) {
+        ctx.fillText('Piece Selected - Pinch to Drop', 50, 35);
+      } else {
+        ctx.fillText('Tracking - Pinch to Select', 50, 35);
+      }
+      
+      // Draw the current square being hovered over
+      const currentSquare = calculateSquareFromPosition(smoothed.x, smoothed.y);
+      ctx.fillText(`Square: ${currentSquare}`, 50, 60);
+      
+      if (selectedSquare) {
+        ctx.fillText(`Selected: ${selectedSquare}`, 50, 85);
+        
+        // Show instructions
+        ctx.fillText('Hover over destination and pinch', 50, 110);
+      }
     } else {
       setIsTracking(false);
       onHandMove?.(null);

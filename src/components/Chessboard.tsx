@@ -8,7 +8,7 @@ interface ChessboardProps {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   soundEnabled: boolean;
-  handPosition?: { x: number; y: number } | null;
+  handPosition?: { x: number; y: number; isPinching?: boolean } | null;
 }
 
 const BOARD_SIZE = 8;
@@ -80,12 +80,15 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
         
         // Update piece position - follow the hand position exactly
         const pos = getSquarePosition(square);
+        
+        // Always keep the piece elevated when selected
+        // This makes it clear that the piece is selected
         const elevation = isLegalTarget ? 0.7 : 0.5;
         
         // This ensures the piece follows the hand position precisely
         selectedPieceRef.current.position.set(pos.x, elevation, pos.z);
         
-        // Store the current target square in the piece's userData for easier access when releasing
+        // Store the current target square in the piece's userData for easier access
         selectedPieceRef.current.userData.targetSquare = square;
         
         // Update the hover highlight color based on move legality
@@ -102,7 +105,8 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
         if (piece && piece.color === chess.turn()) {
           piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
             if (pieceObj.userData.square === square) {
-              pieceObj.position.y = 0.2; // Elevate the piece
+              // Elevate the piece when hovering to show it's selectable
+              pieceObj.position.y = 0.2;
               
               // Highlight this piece to show it's hoverable
               pieceObj.userData.isHovered = true;

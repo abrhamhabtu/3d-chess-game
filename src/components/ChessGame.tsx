@@ -19,7 +19,7 @@ const ChessGame: React.FC = () => {
   const [showHandTracker, setShowHandTracker] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
-  const [handPosition, setHandPosition] = useState<{ x: number; y: number } | null>(null);
+  const [handPosition, setHandPosition] = useState<{ x: number; y: number; isPinching?: boolean } | null>(null);
   
   const { resetGame } = useGameContext();
 
