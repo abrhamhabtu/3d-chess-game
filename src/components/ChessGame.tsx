@@ -15,7 +15,6 @@ const ChessGame: React.FC = () => {
   const [renderer, setRenderer] = useState<THREE.WebGLRenderer | null>(null);
   const [camera, setCamera] = useState<THREE.PerspectiveCamera | null>(null);
   const [scene, setScene] = useState<THREE.Scene | null>(null);
-  const [controls, setControls] = useState<OrbitControls | null>(null);
   const [showHandTracker, setShowHandTracker] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
@@ -57,6 +56,10 @@ const ChessGame: React.FC = () => {
     newControls.minPolarAngle = 0;
     newControls.enablePan = true;
     newControls.target.set(0, 0, 0);
+    
+    // Attach controls to camera userData for access in other components
+    newCamera.userData.controls = newControls;
+    
     newControls.update();
     
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
@@ -75,11 +78,10 @@ const ChessGame: React.FC = () => {
     setRenderer(newRenderer);
     setScene(newScene);
     setCamera(newCamera);
-    setControls(newControls);
 
     const animate = () => {
       requestAnimationFrame(animate);
-      newControls.update();
+      newCamera.userData.controls.update();
       newRenderer.render(newScene, newCamera);
     };
     animate();
@@ -100,7 +102,10 @@ const ChessGame: React.FC = () => {
     
     return () => {
       window.removeEventListener('resize', handleResize);
-      newControls.dispose();
+      // Dispose controls via camera userData if camera exists
+      if (newCamera?.userData?.controls) {
+          newCamera.userData.controls.dispose();
+      }
       newRenderer.dispose();
     };
   }, [renderer]);

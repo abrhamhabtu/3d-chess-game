@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
-import { PieceSymbol, Color, Square } from 'chess.js';
+import { Square } from 'chess.js';
 import { useGameContext } from '../context/GameContext';
 import { createChessPiece } from '../utils/chessPieceModels';
 
@@ -21,125 +21,102 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
   const highlightsRef = useRef<THREE.Group>(new THREE.Group());
   const hoverHighlightRef = useRef<THREE.Mesh | null>(null);
   const selectedPieceRef = useRef<THREE.Object3D | null>(null);
-  const raycaster = useRef(new THREE.Raycaster());
-  const mouse = useRef(new THREE.Vector2());
-  const moveSound = useRef<HTMLAudioElement | null>(null);
-  const captureSound = useRef<HTMLAudioElement | null>(null);
-  
-  const { chess, makeMove, selectedSquare, setSelectedSquare } = useGameContext();
-  const [hoveredSquare, setHoveredSquare] = useState<Square | null>(null);
+  const moveSound = useRef<THREE.Audio | null>(null);
+  const captureSound = useRef<THREE.Audio | null>(null);
 
-  useEffect(() => {
-    moveSound.current = new Audio('/sounds/move.mp3');
-    captureSound.current = new Audio('/sounds/capture.mp3');
-    
-    scene.add(boardRef.current);
-    scene.add(piecesRef.current);
-    scene.add(highlightsRef.current);
-    
-    createChessboard();
-    updatePieces();
-    
-    const canvas = camera.userData.controls?.domElement;
-    if (canvas) {
-      canvas.addEventListener('click', handleClick);
-      
-      return () => {
-        canvas.removeEventListener('click', handleClick);
-        scene.remove(boardRef.current);
-        scene.remove(piecesRef.current);
-        scene.remove(highlightsRef.current);
-      };
-    }
-  }, [scene, camera]);
+  const { chess, makeMove, selectedSquare, setSelectedSquare, gameVersion } = useGameContext();
+  const [isPieceGrabbed, setIsPieceGrabbed] = useState(false);
+  const [lastValidDropTarget, setLastValidDropTarget] = useState<Square | null>(null);
 
-  useEffect(() => {
-    updatePieces();
-  }, [chess]);
+  const getSquarePosition = useCallback((square: Square): { x: number; y: number; z: number } => {
+    const fileIndex = square.charCodeAt(0) - 97; // 'a' -> 0, 'b' -> 1, ...
+    const rankIndex = parseInt(square[1], 10) - 1; // '1' -> 0, '2' -> 1, ...
+    const x = (fileIndex * SQUARE_SIZE) - BOARD_OFFSET;
+    const z = BOARD_OFFSET - (rankIndex * SQUARE_SIZE);
+    return { x, y: 0, z }; // y is usually 0 unless elevated
+  }, []);
 
-  useEffect(() => {
-    updateHighlights();
-  }, [selectedSquare]);
-
-  useEffect(() => {
-    if (handPosition) {
-      const square = calculateSquareFromHandPosition(handPosition.x, handPosition.y);
-      updateHoverHighlight(square);
-      setHoveredSquare(square);
-
-      // If a piece is selected, update its position and show legal moves
-      if (selectedSquare && selectedPieceRef.current) {
-        // Get legal moves for the selected piece
-        const legalMoves = chess.moves({ 
-          square: selectedSquare, 
-          verbose: true 
-        });
-        
-        // Check if the hovered square is a legal move
-        const isLegalTarget = legalMoves.some(move => move.to === square);
-        
-        // Update piece position - follow the hand position exactly
-        const pos = getSquarePosition(square);
-        
-        // Always keep the piece elevated when selected
-        // This makes it clear that the piece is selected
-        const elevation = isLegalTarget ? 0.7 : 0.5;
-        
-        // This ensures the piece follows the hand position precisely
-        selectedPieceRef.current.position.set(pos.x, elevation, pos.z);
-        
-        // Store the current target square in the piece's userData for easier access
-        selectedPieceRef.current.userData.targetSquare = square;
-        
-        // Update the hover highlight color based on move legality
-        if (hoverHighlightRef.current) {
-          const material = hoverHighlightRef.current.material as THREE.MeshBasicMaterial;
-          material.color.setHex(
-            isLegalTarget ? 0x22c55e : 0xef4444
-          );
-          material.opacity = isLegalTarget ? 0.5 : 0.3;
-        }
-      } else {
-        // Find the piece at the hovered square and elevate it if it's the current player's turn
-        const piece = chess.get(square);
-        if (piece && piece.color === chess.turn()) {
-          piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
-            if (pieceObj.userData.square === square) {
-              // Elevate the piece when hovering to show it's selectable
-              pieceObj.position.y = 0.2;
-              
-              // Highlight this piece to show it's hoverable
-              pieceObj.userData.isHovered = true;
-            } else if (!selectedSquare) {
-              pieceObj.position.y = 0; // Reset other pieces
-              pieceObj.userData.isHovered = false;
-            }
-          });
-        }
+  const createChessboard = useCallback(() => {
+    boardRef.current.clear(); // Clear previous board if any
+    const geometry = new THREE.BoxGeometry(SQUARE_SIZE, 0.1, SQUARE_SIZE);
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      for (let j = 0; j < BOARD_SIZE; j++) {
+        const isWhite = (i + j) % 2 === 0;
+        const material = new THREE.MeshStandardMaterial({ color: isWhite ? 0xffffff : 0x404040 });
+        const squareMesh = new THREE.Mesh(geometry, material);
+        const squareName = String.fromCharCode(97 + j) + (BOARD_SIZE - i) as Square;
+        squareMesh.position.set(getSquarePosition(squareName).x, -0.05, getSquarePosition(squareName).z);
+        squareMesh.userData = { type: 'square', square: squareName }; // Store square info
+        boardRef.current.add(squareMesh);
       }
-    } else {
+    }
+  }, [getSquarePosition]);
+
+  const updatePieces = useCallback(() => {
+    console.log("Updating pieces on board...");
+    piecesRef.current.clear();
+    const board = chess.board();
+    board.forEach((row, rowIndex) => {
+      row.forEach((piece, colIndex) => {
+        if (piece) {
+          const square = String.fromCharCode(97 + colIndex) + (8 - rowIndex) as Square;
+          console.log(`Creating 3D piece for ${piece.type} at ${square}`);
+          const pieceMesh = createChessPiece(piece.type, piece.color);
+          const pos = getSquarePosition(square);
+          pieceMesh.position.set(pos.x, 0, pos.z);
+          pieceMesh.userData = { type: 'piece', square: square, pieceType: piece.type, color: piece.color }; // Store piece info
+          piecesRef.current.add(pieceMesh);
+        }
+      });
+    });
+  }, [chess, getSquarePosition]);
+
+  const updateHighlights = useCallback(() => {
+    highlightsRef.current.clear(); // Clear previous highlights
+
+    if (selectedSquare) {
+      // Highlight selected square
+      const selectedPos = getSquarePosition(selectedSquare);
+      const selectedGeometry = new THREE.BoxGeometry(SQUARE_SIZE, 0.02, SQUARE_SIZE);
+      const selectedMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.4 });
+      const selectedHighlight = new THREE.Mesh(selectedGeometry, selectedMaterial);
+      selectedHighlight.position.set(selectedPos.x, 0.05, selectedPos.z);
+      highlightsRef.current.add(selectedHighlight);
+
+      // Highlight legal moves
+      const moves = chess.moves({ square: selectedSquare, verbose: true });
+      moves.forEach(move => {
+        const pos = getSquarePosition(move.to);
+        const moveGeometry = new THREE.RingGeometry(SQUARE_SIZE * 0.2, SQUARE_SIZE * 0.3, 32);
+        const moveMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide, transparent: true, opacity: 0.6 });
+        const moveHighlight = new THREE.Mesh(moveGeometry, moveMaterial);
+        moveHighlight.position.set(pos.x, 0.06, pos.z);
+        moveHighlight.rotation.x = -Math.PI / 2; // Rotate to lay flat
+        highlightsRef.current.add(moveHighlight);
+      });
+    }
+  }, [selectedSquare, chess, getSquarePosition]);
+
+  const clearHoverHighlight = useCallback(() => {
+    if (hoverHighlightRef.current) {
+      hoverHighlightRef.current.visible = false;
+    }
+    // Ensure all non-selected, non-grabbed pieces are grounded
+    if (!selectedSquare && !isPieceGrabbed) {
+      piecesRef.current.children.forEach((p: THREE.Object3D) => { p.position.y = 0 });
+    }
+  }, [selectedSquare, isPieceGrabbed]);
+
+  const updateHoverHighlight = useCallback((square: Square | null) => {
+    if (!square) {
       clearHoverHighlight();
-      setHoveredSquare(null);
-      
-      // Reset selected piece position if hand tracking is lost
-      if (selectedPieceRef.current && selectedSquare) {
-        const pos = getSquarePosition(selectedSquare);
-        selectedPieceRef.current.position.set(pos.x, 0, pos.z);
-      }
+      return;
     }
-  }, [handPosition, selectedSquare]);
 
-  const calculateSquareFromHandPosition = (x: number, y: number): Square => {
-    const file = String.fromCharCode(97 + Math.min(Math.max(Math.floor(x * 8), 0), 7));
-    const rank = Math.min(Math.max(8 - Math.floor(y * 8), 1), 8);
-    return `${file}${rank}` as Square;
-  };
-
-  const updateHoverHighlight = (square: Square) => {
     if (!hoverHighlightRef.current) {
       const geometry = new THREE.BoxGeometry(SQUARE_SIZE, 0.02, SQUARE_SIZE);
       const material = new THREE.MeshBasicMaterial({
-        color: 0x3b82f6,
+        color: 0x3b82f6, // Default blue
         transparent: true,
         opacity: 0.3
       });
@@ -147,313 +124,296 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
       highlightsRef.current.add(hoverHighlightRef.current);
     }
 
-    const piece = chess.get(square);
     const pos = getSquarePosition(square);
-    
     hoverHighlightRef.current.position.set(pos.x, 0.05, pos.z);
-    const material = hoverHighlightRef.current.material as THREE.MeshBasicMaterial;
-    material.color.setHex(
-      piece && piece.color === chess.turn() ? 0x22c55e : 0x3b82f6
-    );
     hoverHighlightRef.current.visible = true;
 
-    // Highlight hoverable pieces
-    if (!selectedSquare) {
-      // Find the piece at the current square
-      let foundPiece = false;
+    const material = hoverHighlightRef.current.material as THREE.MeshBasicMaterial;
+    const piece = chess.get(square);
+    const isMyPiece = piece && piece.color === chess.turn();
+    const isLegalTargetForSelected = selectedSquare && chess.moves({ square: selectedSquare, verbose: true }).some(m => m.to === square);
+    const isLegalTargetForGrabbed = isPieceGrabbed && selectedSquare && chess.moves({ square: selectedSquare, verbose: true }).some(m => m.to === square);
+
+    let hoverColor = 0x3b82f6; // Blue (default/empty square)
+    let hoverOpacity = 0.3;
+
+    if (isPieceGrabbed) {
+      hoverColor = isLegalTargetForGrabbed ? 0x22c55e : 0xef4444; // Green for legal, Red for illegal drop
+      hoverOpacity = isLegalTargetForGrabbed ? 0.5 : 0.3;
+    } else if (selectedSquare) {
+      if (square === selectedSquare) {
+        hoverColor = 0xfacc15; // Yellow for selected piece itself (override standard highlight)
+        hoverOpacity = 0.5;
+      } else if (isLegalTargetForSelected) {
+        hoverColor = 0x22c55e; // Green for legal move target
+        hoverOpacity = 0.4;
+      }
+    } else if (isMyPiece) {
+      hoverColor = 0x60a5fa; // Lighter blue for hover over own piece (selectable)
+      hoverOpacity = 0.4;
+    }
+
+    material.color.setHex(hoverColor);
+    material.opacity = hoverOpacity;
+
+    // Handle piece elevation on hover (only if not selected/grabbed)
+    if (!selectedSquare && !isPieceGrabbed) {
       piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
-        if (pieceObj.userData.square === square) {
-          const piece = chess.get(square);
-          if (piece && piece.color === chess.turn()) {
-            pieceObj.position.y = 0.2;
-            foundPiece = true;
-          }
+        if (pieceObj.userData.square === square && isMyPiece) {
+          pieceObj.position.y = 0.1; // Slight elevation on hover
         } else {
           pieceObj.position.y = 0;
         }
       });
-      
-      // Update selectedPieceRef if hovering over a valid piece
-      if (foundPiece && !selectedSquare) {
-        piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
-          if (pieceObj.userData.square === square) {
-            selectedPieceRef.current = pieceObj;
-          }
-        });
-      }
     }
-  };
 
-  const clearHoverHighlight = () => {
-    if (hoverHighlightRef.current) {
-      hoverHighlightRef.current.visible = false;
-    }
-    
-    // Reset piece heights if no piece is selected
-    if (!selectedSquare) {
-      piecesRef.current.children.forEach(piece => {
-        piece.position.y = 0;
-      });
-    }
-  };
+  }, [clearHoverHighlight, getSquarePosition, chess, selectedSquare, isPieceGrabbed]);
 
-  const handleClick = (event: MouseEvent) => {
-    const canvas = event.target as HTMLCanvasElement;
-    const rect = canvas.getBoundingClientRect();
-    mouse.current.x = ((event.clientX - rect.left) / canvas.clientWidth) * 2 - 1;
-    mouse.current.y = -((event.clientY - rect.top) / canvas.clientHeight) * 2 + 1;
-    
-    raycaster.current.setFromCamera(mouse.current, camera);
-    
-    // Check for intersections with pieces first
-    const pieceIntersects = raycaster.current.intersectObjects(piecesRef.current.children, true);
-    if (pieceIntersects.length > 0) {
-      const intersectedPiece = pieceIntersects[0].object.parent;
-      if (intersectedPiece) {
-        const square = intersectedPiece.userData.square as Square;
-        const piece = chess.get(square);
-        
-        // If we already have a piece selected and click on another valid target square
-        if (selectedSquare && selectedSquare !== square) {
-          // Check if this is a valid move
-          const legalMoves = chess.moves({ 
-            square: selectedSquare, 
-            verbose: true 
-          });
-          
-          const isLegalMove = legalMoves.some(move => move.to === square);
-          
-          if (isLegalMove) {
-            // Execute the move
-            const moveResult = makeMove(selectedSquare, square);
-            if (moveResult && soundEnabled) {
-              if (moveResult.captured) {
-                captureSound.current?.play();
-              } else {
-                moveSound.current?.play();
-              }
-            }
-            selectedPieceRef.current = null;
-            return;
-          }
-        }
-        
-        // Select a piece of the current player's color
-        if (piece && piece.color === chess.turn()) {
-          setSelectedSquare(square);
-          selectedPieceRef.current = intersectedPiece;
-          return;
-        }
-      }
-    }
-    
-    // Check for intersections with the board
-    const boardIntersects = raycaster.current.intersectObjects(boardRef.current.children);
-    if (boardIntersects.length > 0) {
-      const intersectedSquare = boardIntersects[0].object.userData.square as Square;
-      
-      if (selectedSquare) {
-        // Check if this is a valid move
-        const legalMoves = chess.moves({ 
-          square: selectedSquare, 
-          verbose: true 
-        });
-        
-        const isLegalMove = legalMoves.some(move => move.to === intersectedSquare);
-        
-        if (isLegalMove) {
-          // Execute the move if it's legal
-          const moveResult = makeMove(selectedSquare, intersectedSquare);
-          if (moveResult && soundEnabled) {
-            if (moveResult.captured) {
-              captureSound.current?.play();
-            } else {
-              moveSound.current?.play();
-            }
-          }
-        } else {
-          // Provide feedback for illegal moves
-          console.log(`Illegal move attempted: ${selectedSquare} to ${intersectedSquare}`);
-          // The piece will snap back to its original position
-        }
-        selectedPieceRef.current = null;
-      } else {
-        // Try to select a piece at this square
-        const piece = chess.get(intersectedSquare);
-        if (piece && piece.color === chess.turn()) {
-          setSelectedSquare(intersectedSquare);
-          
-          // Find the piece object
-          piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
-            if (pieceObj.userData.square === intersectedSquare) {
-              selectedPieceRef.current = pieceObj;
-            }
-          });
-        }
-      }
-    }
-  };
+  const calculateSquareFromHandPosition = useCallback((x: number, y: number): Square => {
+    // Normalize x and y (assuming they are 0-1 range from HandTracker)
+    // Calculate file (a-h) and rank (1-8)
+    const fileIndex = Math.min(Math.max(Math.floor(x * BOARD_SIZE), 0), BOARD_SIZE - 1);
+    const rankIndex = Math.min(Math.max(Math.floor((1 - y) * BOARD_SIZE), 0), BOARD_SIZE - 1); // Invert y
 
-  const createChessboard = () => {
-    const board = boardRef.current;
-    board.clear();
-    
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      for (let j = 0; j < BOARD_SIZE; j++) {
-        const isWhite = (i + j) % 2 === 0;
-        const color = isWhite ? 0xe2e8f0 : 0x475569;
-        
-        const geometry = new THREE.BoxGeometry(SQUARE_SIZE, 0.1, SQUARE_SIZE);
-        const material = new THREE.MeshStandardMaterial({ 
-          color, 
-          roughness: 0.7,
-          metalness: 0.1
-        });
-        
-        const square = new THREE.Mesh(geometry, material);
-        square.position.set(
-          j * SQUARE_SIZE - BOARD_OFFSET,
-          -0.05,
-          i * SQUARE_SIZE - BOARD_OFFSET
-        );
-        square.receiveShadow = true;
-        
-        const file = String.fromCharCode(97 + j);
-        const rank = 8 - i;
-        const squareName = `${file}${rank}` as Square;
-        square.userData.square = squareName;
-        
-        board.add(square);
+    const file = String.fromCharCode(97 + fileIndex);
+    const rank = rankIndex + 1;
+    return `${file}${rank}` as Square;
+  }, []);
+
+  useEffect(() => {
+    // Initial setup
+    const audioLoader = new THREE.AudioLoader();
+    const listener = new THREE.AudioListener();
+    camera.add(listener);
+
+    audioLoader.load('/sounds/move.mp3', (buffer) => {
+      if (moveSound.current) {
+        moveSound.current.setBuffer(buffer);
+        moveSound.current.setLoop(false);
+        moveSound.current.setVolume(0.5);
       }
-    }
-    
-    const borderSize = BOARD_SIZE * SQUARE_SIZE + 0.3;
-    const borderGeometry = new THREE.BoxGeometry(borderSize, 0.12, borderSize);
-    const borderMaterial = new THREE.MeshStandardMaterial({ 
-      color: 0x1e293b, 
-      roughness: 0.8,
-      metalness: 0.2 
     });
-    
-    const border = new THREE.Mesh(borderGeometry, borderMaterial);
-    border.position.y = -0.11;
-    border.receiveShadow = true;
-    board.add(border);
-  };
+    audioLoader.load('/sounds/capture.mp3', (buffer) => {
+      if (captureSound.current) {
+        captureSound.current.setBuffer(buffer);
+        captureSound.current.setLoop(false);
+        captureSound.current.setVolume(0.5);
+      }
+    });
 
-  const updatePieces = () => {
-    piecesRef.current.clear();
-    selectedPieceRef.current = null;
+    moveSound.current = new THREE.Audio(listener);
+    captureSound.current = new THREE.Audio(listener);
+
+    scene.add(boardRef.current);
+    scene.add(piecesRef.current);
+    scene.add(highlightsRef.current);
+
+    createChessboard(); // Call memoized version
+    updatePieces();
+
+    // Store current ref values for cleanup
+    const currentBoardGroup = boardRef.current;
+    const currentPiecesGroup = piecesRef.current;
+    const currentHighlightsGroup = highlightsRef.current;
+
+    // Cleanup function
+    return () => {
+      scene.remove(currentBoardGroup); // Use stored group refs
+      scene.remove(currentPiecesGroup);
+      scene.remove(currentHighlightsGroup);
+      if (camera.children.includes(listener)) {
+        camera.remove(listener); // Clean up listener
+      }
+    };
+  }, [scene, camera, createChessboard, updatePieces]);
+
+  useEffect(() => {
+    console.log("Chessboard: Game version changed, updating pieces:", gameVersion);
+    console.log("Current turn:", chess.turn()); // Log whose turn it is
     
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      for (let j = 0; j < BOARD_SIZE; j++) {
-        const file = String.fromCharCode(97 + j);
-        const rank = 8 - i;
-        const square = `${file}${rank}` as Square;
-        
-        const piece = chess.get(square);
+    // Debug: Log all pieces on the board
+    const board = chess.board();
+    for (let i = 0; i < board.length; i++) {
+      for (let j = 0; j < board[i].length; j++) {
+        const piece = board[i][j];
         if (piece) {
-          const pieceObj = createChessPiece(piece.type as PieceSymbol, piece.color as Color);
-          pieceObj.position.set(
-            j * SQUARE_SIZE - BOARD_OFFSET,
-            0,
-            i * SQUARE_SIZE - BOARD_OFFSET
+          const square = String.fromCharCode(97 + j) + (8 - i) as Square;
+          console.log(`Piece at ${square}: ${piece.type} (${piece.color})`);
+        }
+      }
+    }
+    
+    updatePieces();
+    
+    // Debug: Log all 3D piece objects after updating
+    setTimeout(() => {
+      console.log("3D Pieces after update:");
+      piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
+        console.log(`3D Piece at ${pieceObj.userData.square}: ${pieceObj.userData.pieceType} (${pieceObj.userData.color})`);
+      });
+    }, 100); // Small delay to ensure pieces are updated
+  }, [chess, updatePieces, gameVersion]);
+
+  useEffect(() => {
+    updateHighlights();
+  }, [selectedSquare, updateHighlights]);
+
+  useEffect(() => {
+    if (!handPosition) {
+      // Hand tracking lost
+      if (isPieceGrabbed && selectedSquare && selectedPieceRef.current) {
+        // If a piece was grabbed, snap it back to original square
+        const pos = getSquarePosition(selectedSquare);
+        selectedPieceRef.current.position.set(pos.x, 0, pos.z);
+      }
+      setIsPieceGrabbed(false);
+      clearHoverHighlight();
+      setLastValidDropTarget(null);
+      return;
+    }
+
+    const hoveredSquare = calculateSquareFromHandPosition(handPosition.x, handPosition.y);
+    updateHoverHighlight(hoveredSquare); // Update hover based on hand
+
+    // --- State Machine for Hand Interaction --- 
+     // --- State 0: No piece grabbed - Waiting for pinch-to-select --- 
+    if (!isPieceGrabbed) {
+      if (handPosition.isPinching && hoveredSquare) {
+        const piece = chess.get(hoveredSquare);
+        console.log(`Pinch detected at ${hoveredSquare}. Piece:`, piece, `Current turn: ${chess.turn()}`);
+        
+        // Check if pinch is over a piece belonging to the current player
+        if (piece && piece.color === chess.turn()) {
+          console.log(`[Grab Attempt] Pinching over valid piece ${piece.type} at ${hoveredSquare}. Grabbing.`);
+          setSelectedSquare(hoveredSquare); // Select the piece
+          setIsPieceGrabbed(true);          // Set grabbed state
+          setLastValidDropTarget(null);     // Reset last valid target
+
+          // Find the 3D object for the selected piece
+          const foundPiece = piecesRef.current.children.find(
+            (p: THREE.Object3D) => p.userData.square === hoveredSquare
           );
           
-          pieceObj.userData.square = square;
-          pieceObj.userData.piece = piece;
-          
-          piecesRef.current.add(pieceObj);
+          if (foundPiece) {
+            console.log(`Found 3D object for ${hoveredSquare}:`, foundPiece.userData);
+            selectedPieceRef.current = foundPiece;
+          } else {
+            console.error(`[Grab Error] Could not find 3D object for ${hoveredSquare} in piecesRef children:`, 
+              piecesRef.current.children.map(p => `${p.userData.square}: ${p.userData.pieceType}`));
+            selectedPieceRef.current = null;
+          }
+
+          if (selectedPieceRef.current) {
+            selectedPieceRef.current.position.y = 0.5; // Elevate grabbed piece
+            if (camera.userData.controls) camera.userData.controls.enabled = false; // Disable camera controls
+            console.log(`[Grab Success] Piece at ${hoveredSquare} selected and grabbed.`);
+          } else {
+            console.error(`[Grab Error] Could not find 3D object for ${hoveredSquare} after pinch.`);
+            // Reset state if piece object not found
+            setSelectedSquare(null);
+            setIsPieceGrabbed(false);
+          }
+        } else {
+          if (piece) {
+            console.log(`[Grab Ignore] Pinch over opponent piece ${piece.type} at ${hoveredSquare}. Current turn: ${chess.turn()}, Piece color: ${piece.color}`);
+          } else {
+            console.log(`[Grab Ignore] Pinch over empty square (${hoveredSquare}).`);
+          }
+          // Pinch started over invalid square, do nothing
         }
+      } else {
+        // Not pinching or no hovered square - ensure pieces are grounded
+        piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
+          // Ground all pieces if nothing is grabbed
+          pieceObj.position.y = 0;
+        });
       }
     }
-  };
 
-  const updateHighlights = () => {
-    highlightsRef.current.clear();
-    
-    if (!selectedSquare) return;
-    
-    // Highlight the selected square
-    const squarePos = getSquarePosition(selectedSquare);
-    const highlightGeometry = new THREE.BoxGeometry(SQUARE_SIZE, 0.02, SQUARE_SIZE);
-    const highlightMaterial = new THREE.MeshBasicMaterial({ 
-      color: 0x3b82f6,
-      transparent: true,
-      opacity: 0.6
-    });
-    
-    const highlight = new THREE.Mesh(highlightGeometry, highlightMaterial);
-    highlight.position.set(squarePos.x, 0.05, squarePos.z);
-    highlightsRef.current.add(highlight);
-    
-    // Get all legal moves for the selected piece
-    const legalMoves = chess.moves({ 
-      square: selectedSquare, 
-      verbose: true 
-    });
-    
-    // Create visual highlights for all legal moves
-    legalMoves.forEach(move => {
-      const movePos = getSquarePosition(move.to);
-      const isCapture = !!move.captured;
-      const isCheck = move.san.includes('+');
-      const isCheckmate = move.san.includes('#');
-      
-      // Different colors for different types of moves
-      let moveColor = 0x22c55e; // Default green for normal moves
-      if (isCheckmate) {
-        moveColor = 0xf59e0b; // Orange for checkmate
-      } else if (isCheck) {
-        moveColor = 0x8b5cf6; // Purple for check
-      } else if (isCapture) {
-        moveColor = 0xef4444; // Red for captures
-      }
-      
-      const moveMaterial = new THREE.MeshBasicMaterial({ 
-        color: moveColor,
-        transparent: true,
-        opacity: 0.5
-      });
-      
-      const moveHighlight = new THREE.Mesh(highlightGeometry, moveMaterial);
-      moveHighlight.position.set(movePos.x, 0.05, movePos.z);
-      highlightsRef.current.add(moveHighlight);
-      
-      // Add a pulsing animation for important moves (check/checkmate)
-      if (isCheck || isCheckmate) {
-        const pulseAnimation = () => {
-          if (!moveHighlight.parent) return; // Stop if removed from scene
-          
-          // Pulse the opacity
-          const time = Date.now() * 0.001;
-          const opacity = 0.3 + Math.sin(time * 4) * 0.2;
-          (moveHighlight.material as THREE.MeshBasicMaterial).opacity = opacity;
-          
-          requestAnimationFrame(pulseAnimation);
-        };
+    // --- State 1: Piece is grabbed by hand, moving/dropping --- 
+    else if (selectedSquare && isPieceGrabbed && selectedPieceRef.current) {
+      if (handPosition.isPinching) {
+        // --- Pinch Held Logic --- 
+        // Piece follows hand while pinch is held
+        const legalMoves = chess.moves({ square: selectedSquare, verbose: true });
+        const isLegalTarget = legalMoves.some(move => move.to === hoveredSquare);
+        const pos = getSquarePosition(hoveredSquare || selectedSquare); // Fallback to selected square if hover is null?
+        const elevation = isLegalTarget ? 0.7 : 0.5;
+        selectedPieceRef.current.position.set(pos.x, elevation, pos.z);
+
+        // Store the hovered square if it's a valid target
+        if (isLegalTarget && hoveredSquare) {
+          setLastValidDropTarget(hoveredSquare);
+        } else {
+          // If hovering over invalid square while dragging, clear the stored target
+          // Optional: Or keep the last known valid one? Let's clear for now.
+          setLastValidDropTarget(null);
+        }
         
-        pulseAnimation();
+        // No need to update hover highlight color here, updateHoverHighlight handles it
+      } else {
+        // --- Pinch Released Logic --- 
+        console.log(`[Drop Attempt] Pinch released. State: selected=${selectedSquare}, grabbed=${isPieceGrabbed}, hovered=${hoveredSquare}, lastValid=${lastValidDropTarget}`); 
+        if (camera.userData.controls) camera.userData.controls.enabled = true; // Re-enable camera controls
+
+        if (!selectedSquare || !selectedPieceRef.current) {
+          console.error("[Drop Error] Missing selectedSquare or selectedPieceRef on drop attempt.");
+          setIsPieceGrabbed(false);
+          clearHoverHighlight();
+          setLastValidDropTarget(null); // Reset stored target
+          return; // Exit early if state is inconsistent
+        }
+
+        // Use the stored lastValidDropTarget for the move attempt
+        const targetSquare = lastValidDropTarget;
+
+        const legalMoves = chess.moves({ square: selectedSquare, verbose: true });
+        const isLegalMove = targetSquare && legalMoves.some(move => move.to === targetSquare);
+        console.log(`[Drop Check] Using lastValidDropTarget. Is move ${selectedSquare} -> ${targetSquare} legal? ${isLegalMove}`);
+
+        if (isLegalMove && targetSquare) { // Ensure targetSquare is not null
+          console.log(`[Drop Action] Making move: ${selectedSquare} -> ${targetSquare}`);
+          const moveResult = makeMove(selectedSquare, targetSquare); // Use targetSquare
+          console.log(`[Drop Result] makeMove returned:`, moveResult); // Log result
+
+          if (moveResult) { // Check if makeMove was successful (returned a move object)
+            if (soundEnabled) {
+              if (moveResult.captured) captureSound.current?.play();
+              else moveSound.current?.play();
+            }
+            console.log(`[Drop Success] Move successful. Deselecting piece.`);
+            setSelectedSquare(null); // Deselect after successful move
+            selectedPieceRef.current = null; // Clear ref to the piece object
+          } else {
+            console.warn(`[Drop Failed] makeMove returned null/false for ${selectedSquare} -> ${targetSquare}. Snapping back.`);
+            // Snap back to original square if makeMove failed unexpectedly (shouldn't happen if isLegalMove was true)
+            const originalPos = getSquarePosition(selectedSquare);
+            selectedPieceRef.current.position.set(originalPos.x, 0, originalPos.z);
+          }
+        } else {
+          console.log(`[Drop Invalid] Invalid drop target (lastValid=${targetSquare}, currentHover=${hoveredSquare}). Snapping back ${selectedSquare}.`);
+          // Snap back to original square if drop target is invalid
+          const originalPos = getSquarePosition(selectedSquare);
+          selectedPieceRef.current.position.set(originalPos.x, 0, originalPos.z);
+        }
+        console.log(`[Drop End] Setting isPieceGrabbed to false.`);
+        setIsPieceGrabbed(false); // Reset grabbed state regardless of drop success
+        setLastValidDropTarget(null); // Reset stored target
+        clearHoverHighlight(); // Clear specific drop highlights
       }
-    });
-
-    if (hoverHighlightRef.current) {
-      highlightsRef.current.add(hoverHighlightRef.current);
     }
-  };
 
-  const getSquarePosition = (square: Square) => {
-    const file = square.charCodeAt(0) - 97;
-    const rank = 8 - parseInt(square[1]);
-    
-    return {
-      x: file * SQUARE_SIZE - BOARD_OFFSET,
-      y: 0,
-      z: rank * SQUARE_SIZE - BOARD_OFFSET
-    };
-  };
+    // State 3: No piece selected or grabbed - standard hover behavior
+    else {
+      // Ground all pieces if no piece is selected or grabbed, handled by updateHoverHighlight
+      if (camera.userData.controls && !camera.userData.controls.enabled) {
+        camera.userData.controls.enabled = true; // Ensure controls re-enabled if hand lost mid-grab
+      }
+    }
 
-  return null;
+  }, [handPosition, selectedSquare, isPieceGrabbed, chess, updateHoverHighlight, clearHoverHighlight, setSelectedSquare, makeMove, soundEnabled, camera, getSquarePosition, calculateSquareFromHandPosition, lastValidDropTarget]);
+
+  return null; // This component doesn't render directly, it modifies the scene
 };
 
 export default Chessboard;
