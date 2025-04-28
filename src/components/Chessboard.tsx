@@ -54,21 +54,40 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
 
   const updatePieces = useCallback(() => {
     console.log("Updating pieces on board...");
+    // Clear existing pieces
     piecesRef.current.clear();
+    
+    // Get the current board state from chess.js
     const board = chess.board();
+    
+    // Create new 3D pieces based on the current board state
     board.forEach((row, rowIndex) => {
       row.forEach((piece, colIndex) => {
         if (piece) {
           const square = String.fromCharCode(97 + colIndex) + (8 - rowIndex) as Square;
           console.log(`Creating 3D piece for ${piece.type} at ${square}`);
+          
+          // Create the 3D piece mesh
           const pieceMesh = createChessPiece(piece.type, piece.color);
           const pos = getSquarePosition(square);
           pieceMesh.position.set(pos.x, 0, pos.z);
-          pieceMesh.userData = { type: 'piece', square: square, pieceType: piece.type, color: piece.color }; // Store piece info
+          
+          // Store important metadata with the 3D object
+          pieceMesh.userData = { 
+            type: 'piece', 
+            square: square, 
+            pieceType: piece.type, 
+            color: piece.color 
+          };
+          
+          // Add to the pieces group
           piecesRef.current.add(pieceMesh);
         }
       });
     });
+    
+    // Log the total number of pieces created
+    console.log(`Total 3D pieces created: ${piecesRef.current.children.length}`);
   }, [chess, getSquarePosition]);
 
   const updateHighlights = useCallback(() => {
@@ -231,26 +250,49 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
     console.log("Chessboard: Game version changed, updating pieces:", gameVersion);
     console.log("Current turn:", chess.turn()); // Log whose turn it is
     
-    // Debug: Log all pieces on the board
+    // Debug: Log all pieces on the board from chess.js
+    console.log("Current board state from chess.js:");
     const board = chess.board();
+    let whitePieces = 0;
+    let blackPieces = 0;
+    
     for (let i = 0; i < board.length; i++) {
       for (let j = 0; j < board[i].length; j++) {
         const piece = board[i][j];
         if (piece) {
           const square = String.fromCharCode(97 + j) + (8 - i) as Square;
           console.log(`Piece at ${square}: ${piece.type} (${piece.color})`);
+          if (piece.color === 'w') whitePieces++;
+          else blackPieces++;
         }
       }
     }
+    console.log(`Total pieces on board: ${whitePieces} white, ${blackPieces} black`);
     
+    // Clear and recreate all 3D pieces to ensure they match the logical board
     updatePieces();
     
     // Debug: Log all 3D piece objects after updating
     setTimeout(() => {
       console.log("3D Pieces after update:");
+      let white3DPieces = 0;
+      let black3DPieces = 0;
+      
       piecesRef.current.children.forEach((pieceObj: THREE.Object3D) => {
         console.log(`3D Piece at ${pieceObj.userData.square}: ${pieceObj.userData.pieceType} (${pieceObj.userData.color})`);
+        if (pieceObj.userData.color === 'w') white3DPieces++;
+        else black3DPieces++;
       });
+      
+      console.log(`Total 3D pieces: ${white3DPieces} white, ${black3DPieces} black`);
+      
+      // Verify that 3D pieces match logical board
+      if (white3DPieces !== whitePieces || black3DPieces !== blackPieces) {
+        console.error("MISMATCH between chess.js board and 3D pieces!");
+        console.error(`Board has ${whitePieces}w/${blackPieces}b but 3D has ${white3DPieces}w/${black3DPieces}b`);
+      } else {
+        console.log("✓ 3D pieces match chess.js board state");
+      }
     }, 100); // Small delay to ensure pieces are updated
   }, [chess, updatePieces, gameVersion]);
 
@@ -279,8 +321,21 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
      // --- State 0: No piece grabbed - Waiting for pinch-to-select --- 
     if (!isPieceGrabbed) {
       if (handPosition.isPinching && hoveredSquare) {
+        // Get the piece from the chess.js board
         const piece = chess.get(hoveredSquare);
         console.log(`Pinch detected at ${hoveredSquare}. Piece:`, piece, `Current turn: ${chess.turn()}`);
+        
+        // Force a refresh of the 3D pieces to ensure they match the chess.js board
+        // This is a safety measure to ensure 3D objects are in sync with the logical board
+        if (gameVersion > 0 && piecesRef.current.children.length > 0) {
+          // Only log this when we're past the initial setup
+          console.log(`Checking 3D piece objects for ${hoveredSquare}...`);
+          
+          // Log all 3D pieces for debugging
+          piecesRef.current.children.forEach((p: THREE.Object3D) => {
+            console.log(`Available 3D piece: ${p.userData.square} - ${p.userData.pieceType} (${p.userData.color})`);
+          });
+        }
         
         // Check if pinch is over a piece belonging to the current player
         if (piece && piece.color === chess.turn()) {
@@ -289,7 +344,7 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
           setIsPieceGrabbed(true);          // Set grabbed state
           setLastValidDropTarget(null);     // Reset last valid target
 
-          // Find the 3D object for the selected piece
+          // Find the 3D object for the selected piece - search by square
           const foundPiece = piecesRef.current.children.find(
             (p: THREE.Object3D) => p.userData.square === hoveredSquare
           );
@@ -300,7 +355,26 @@ const Chessboard: React.FC<ChessboardProps> = ({ scene, camera, soundEnabled, ha
           } else {
             console.error(`[Grab Error] Could not find 3D object for ${hoveredSquare} in piecesRef children:`, 
               piecesRef.current.children.map(p => `${p.userData.square}: ${p.userData.pieceType}`));
-            selectedPieceRef.current = null;
+            
+            // If we can't find the piece by square, try to recreate it
+            console.log(`Attempting to recreate 3D piece for ${hoveredSquare}...`);
+            updatePieces(); // Force update all pieces
+            
+            // Try to find the piece again after updating
+            setTimeout(() => {
+              const retryFoundPiece = piecesRef.current.children.find(
+                (p: THREE.Object3D) => p.userData.square === hoveredSquare
+              );
+              
+              if (retryFoundPiece) {
+                console.log(`Successfully found 3D piece after update: ${hoveredSquare}`);
+                selectedPieceRef.current = retryFoundPiece;
+                selectedPieceRef.current.position.y = 0.5; // Elevate the piece
+              } else {
+                console.error(`Still could not find 3D piece after update: ${hoveredSquare}`);
+                selectedPieceRef.current = null;
+              }
+            }, 50);
           }
 
           if (selectedPieceRef.current) {
